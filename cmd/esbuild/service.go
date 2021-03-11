@@ -8,6 +8,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/evanw/esbuild/internal/mux"
 	"io"
 	"io/ioutil"
 	"os"
@@ -382,10 +383,11 @@ func (service *serviceType) handleBuildRequest(id uint32, request map[string]int
 	}
 
 	if plugins, ok := request["plugins"]; ok {
-		if plugins, err := service.convertPlugins(key, plugins); err != nil {
+		if plugins, trie, err := service.convertPlugins(key, plugins); err != nil {
 			return outgoingPacket{bytes: encodeErrorPacket(id, err)}
 		} else {
 			options.Plugins = plugins
+			options.Trie = trie
 		}
 	}
 
@@ -550,8 +552,9 @@ func (service *serviceType) handleServeRequest(id uint32, options api.BuildOptio
 	}
 }
 
-func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]api.Plugin, error) {
+func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]api.Plugin, mux.Tree, error) {
 	var goPlugins []api.Plugin
+	var goTrie = mux.NewTree()
 
 	type filteredCallback struct {
 		filter     *regexp.Regexp
@@ -585,13 +588,13 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 		pluginName := p["name"].(string)
 
 		if callbacks, err := filteredCallbacks(pluginName, "onResolve", p["onResolve"].([]interface{})); err != nil {
-			return nil, err
+			return nil, mux.Tree{}, err
 		} else {
 			onResolveCallbacks = append(onResolveCallbacks, callbacks...)
 		}
 
 		if callbacks, err := filteredCallbacks(pluginName, "onLoad", p["onLoad"].([]interface{})); err != nil {
-			return nil, err
+			return nil, mux.Tree{}, err
 		} else {
 			onLoadCallbacks = append(onLoadCallbacks, callbacks...)
 		}
@@ -758,7 +761,7 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 		},
 	})
 
-	return goPlugins, nil
+	return goPlugins, *goTrie, nil
 }
 
 func (service *serviceType) handleTransformRequest(id uint32, request map[string]interface{}) []byte {

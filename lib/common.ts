@@ -604,12 +604,13 @@ export function createChannel(streamIn: StreamIn): StreamOut {
           let registeredNote = extractCallerV8(new Error(registeredText), streamIn, 'onResolve');
           let keys: OptionKeys = {};
           let filter = getFlag(options, keys, 'filter', mustBeRegExp);
+          let route = getFlag(options, keys, 'route', mustBeString);
           let namespace = getFlag(options, keys, 'namespace', mustBeString);
           checkForInvalidFlags(options, keys, `in onResolve() call for plugin ${JSON.stringify(name)}`);
-          if (filter == null) throw new Error(`[${plugin.name}] onResolve() call is missing a filter`);
+          if (filter == null && route == null) throw new Error(`[${plugin.name}] onResolve() call is missing filter or route`);
           let id = nextCallbackID++;
           onResolveCallbacks[id] = { name: name!, callback, note: registeredNote };
-          plugin.onResolve.push({ id, filter: filter.source, namespace: namespace || '' });
+          plugin.onResolve.push({ id, filter: filter ? filter.source : '~', route: route ? route : '', namespace: namespace || '' });
         },
 
         onLoad(options, callback) {
@@ -617,12 +618,13 @@ export function createChannel(streamIn: StreamIn): StreamOut {
           let registeredNote = extractCallerV8(new Error(registeredText), streamIn, 'onLoad');
           let keys: OptionKeys = {};
           let filter = getFlag(options, keys, 'filter', mustBeRegExp);
+          let route = getFlag(options, keys, 'route', mustBeString);
           let namespace = getFlag(options, keys, 'namespace', mustBeString);
           checkForInvalidFlags(options, keys, `in onLoad() call for plugin ${JSON.stringify(name)}`);
-          if (filter == null) throw new Error(`[${plugin.name}] onLoad() call is missing a filter`);
+          if (filter == null && route == null) throw new Error(`[${plugin.name}] onLoad() call is missing filter or route`);
           let id = nextCallbackID++;
           onLoadCallbacks[id] = { name: name!, callback, note: registeredNote };
-          plugin.onLoad.push({ id, filter: filter.source, namespace: namespace || '' });
+          plugin.onLoad.push({ id, filter: filter ? filter.source : '~', route: route ? route : '', namespace: namespace || '' });
         },
       });
 

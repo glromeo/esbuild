@@ -77,6 +77,8 @@
 //
 package api
 
+import "github.com/evanw/esbuild/internal/mux"
+
 type SourceMap uint8
 
 const (
@@ -273,6 +275,7 @@ type BuildOptions struct {
 	Write       bool
 	Incremental bool
 	Plugins     []Plugin
+	Trie        mux.Tree
 
 	Watch *WatchMode
 }
@@ -402,6 +405,7 @@ type PluginBuild interface {
 
 type OnResolveOptions struct {
 	Filter    string
+	Route     string
 	Namespace string
 }
 
@@ -428,6 +432,7 @@ type OnResolveResult struct {
 
 type OnLoadOptions struct {
 	Filter    string
+	Route     string
 	Namespace string
 }
 

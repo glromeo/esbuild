@@ -185,7 +185,8 @@ export interface PluginBuild {
 }
 
 export interface OnResolveOptions {
-  filter: RegExp;
+  filter?: RegExp;
+  route?: string;
   namespace?: string;
 }
 
@@ -224,7 +225,8 @@ export interface OnResolveResult {
 }
 
 export interface OnLoadOptions {
-  filter: RegExp;
+  filter?: RegExp;
+  route?: string;
   namespace?: string;
 }
 
