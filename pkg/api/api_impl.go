@@ -338,7 +338,7 @@ func isValidExtension(ext string) bool {
 
 func validateResolveExtensions(log logger.Log, order []string) []string {
 	if order == nil {
-		return []string{".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".js", ".css", ".json"}
+		return []string{".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
 	}
 	for _, ext := range order {
 		if !isValidExtension(ext) {
@@ -503,6 +503,20 @@ func validateOutputExtensions(log logger.Log, outExtensions map[string]string) (
 	return
 }
 
+func validateBannerOrFooter(log logger.Log, name string, values map[string]string) (js string, css string) {
+	for key, value := range values {
+		switch key {
+		case "js":
+			js = value
+		case "css":
+			css = value
+		default:
+			log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid %s file type: %q (valid: css, js)", name, key))
+		}
+	}
+	return
+}
+
 func convertLocationToPublic(loc *logger.MsgLocation) *Location {
 	if loc != nil {
 		return &Location{
@@ -589,9 +603,10 @@ type internalBuildResult struct {
 }
 
 func buildImpl(buildOpts BuildOptions) internalBuildResult {
+	start := time.Now()
 	logOptions := logger.OutputOptions{
 		IncludeSource: true,
-		MessageLimit:  buildOpts.ErrorLimit,
+		MessageLimit:  buildOpts.LogLimit,
 		Color:         validateColor(buildOpts.Color),
 		LogLevel:      validateLogLevel(buildOpts.LogLevel),
 	}
@@ -608,7 +623,63 @@ func buildImpl(buildOpts BuildOptions) internalBuildResult {
 
 	// Do not re-evaluate plugins when rebuilding
 	plugins := loadPlugins(realFS, log, buildOpts.Plugins)
-	return rebuildImpl(buildOpts, cache.MakeCacheSet(), plugins, logOptions, log, false /* isRebuild */)
+	internalResult := rebuildImpl(buildOpts, cache.MakeCacheSet(), plugins, logOptions, log, false /* isRebuild */)
+
+	// Print a summary of the generated files to stderr. Except don't do
+	// this if the terminal is already being used for something else.
+	if logOptions.LogLevel <= logger.LevelInfo && len(internalResult.result.OutputFiles) > 0 &&
+		buildOpts.Watch == nil && !buildOpts.Incremental && !internalResult.options.WriteToStdout {
+		printSummary(logOptions, internalResult.result.OutputFiles, start)
+	}
+
+	return internalResult
+}
+
+func printSummary(logOptions logger.OutputOptions, outputFiles []OutputFile, start time.Time) {
+	var table logger.SummaryTable = make([]logger.SummaryTableEntry, len(outputFiles))
+
+	if len(outputFiles) > 0 {
+		if cwd, err := os.Getwd(); err == nil {
+			if realFS, err := fs.RealFS(fs.RealFSOptions{AbsWorkingDir: cwd}); err == nil {
+				for i, file := range outputFiles {
+					path, ok := realFS.Rel(realFS.Cwd(), file.Path)
+					if !ok {
+						path = file.Path
+					}
+					base := realFS.Base(path)
+					n := len(file.Contents)
+					var size string
+					if n < 1024 {
+						size = fmt.Sprintf("%db ", n)
+					} else if n < 1024*1024 {
+						size = fmt.Sprintf("%.1fkb", float64(n)/(1024))
+					} else if n < 1024*1024*1024 {
+						size = fmt.Sprintf("%.1fmb", float64(n)/(1024*1024))
+					} else {
+						size = fmt.Sprintf("%.1fgb", float64(n)/(1024*1024*1024))
+					}
+					table[i] = logger.SummaryTableEntry{
+						Dir:         path[:len(path)-len(base)],
+						Base:        base,
+						Size:        size,
+						Bytes:       n,
+						IsSourceMap: strings.HasSuffix(base, ".map"),
+					}
+				}
+			}
+		}
+	}
+
+	// Don't print the time taken by the build if we're running under Yarn 1
+	// since Yarn 1 always prints its own copy of the time taken by each command
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "npm_config_user_agent=") && strings.Contains(env, "yarn/1.") {
+			logger.PrintSummary(logOptions.Color, table, nil)
+			return
+		}
+	}
+
+	logger.PrintSummary(logOptions.Color, table, &start)
 }
 
 func rebuildImpl(
@@ -630,6 +701,8 @@ func rebuildImpl(
 	}
 	jsFeatures, cssFeatures := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
 	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
+	bannerJS, bannerCSS := validateBannerOrFooter(log, "banner", buildOpts.Banner)
+	footerJS, footerCSS := validateBannerOrFooter(log, "footer", buildOpts.Footer)
 	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure)
 	options := config.Options{
 		UnsupportedJSFeatures:  jsFeatures,
@@ -654,7 +727,7 @@ func rebuildImpl(
 		AbsOutputFile:         validatePath(log, realFS, buildOpts.Outfile, "outfile path"),
 		AbsOutputDir:          validatePath(log, realFS, buildOpts.Outdir, "outdir path"),
 		AbsOutputBase:         validatePath(log, realFS, buildOpts.Outbase, "outbase path"),
-		AbsMetadataFile:       validatePath(log, realFS, buildOpts.Metafile, "metafile path"),
+		NeedsMetafile:         buildOpts.Metafile,
 		ChunkPathTemplate:     validatePathTemplate(buildOpts.ChunkNames),
 		AssetPathTemplate:     validatePathTemplate(buildOpts.AssetNames),
 		OutputExtensionJS:     outJS,
@@ -664,15 +737,21 @@ func rebuildImpl(
 		ExternalModules:       validateExternals(log, realFS, buildOpts.External),
 		TsConfigOverride:      validatePath(log, realFS, buildOpts.Tsconfig, "tsconfig path"),
 		MainFields:            buildOpts.MainFields,
+		Conditions:            append([]string{}, buildOpts.Conditions...),
 		PublicPath:            buildOpts.PublicPath,
 		KeepNames:             buildOpts.KeepNames,
 		InjectAbsPaths:        make([]string, len(buildOpts.Inject)),
 		AbsNodePaths:          make([]string, len(buildOpts.NodePaths)),
-		Banner:                buildOpts.Banner,
-		Footer:                buildOpts.Footer,
+		JSBanner:              bannerJS,
+		JSFooter:              footerJS,
+		CSSBanner:             bannerCSS,
+		CSSFooter:             footerCSS,
 		PreserveSymlinks:      buildOpts.PreserveSymlinks,
 		WatchMode:             buildOpts.Watch != nil,
 		Plugins:               plugins,
+	}
+	if options.MainFields != nil {
+		options.MainFields = append([]string{}, options.MainFields...)
 	}
 	for i, path := range buildOpts.Inject {
 		options.InjectAbsPaths[i] = validatePath(log, realFS, path, "inject path")
@@ -712,9 +791,6 @@ func rebuildImpl(
 		// Forbid certain features when writing to stdout
 		if options.SourceMap != config.SourceMapNone && options.SourceMap != config.SourceMapInline {
 			log.AddError(nil, logger.Loc{}, "Cannot use an external source map without an output path")
-		}
-		if options.AbsMetadataFile != "" {
-			log.AddError(nil, logger.Loc{}, "Cannot use \"metafile\" without an output path")
 		}
 		for _, loader := range options.ExtensionToLoader {
 			if loader == config.LoaderFile {
@@ -758,6 +834,7 @@ func rebuildImpl(
 	}
 
 	var outputFiles []OutputFile
+	var metafileJSON string
 	var watchData fs.WatchData
 
 	// Stop now if there were errors
@@ -770,7 +847,8 @@ func rebuildImpl(
 		// Stop now if there were errors
 		if !log.HasErrors() {
 			// Compile the bundle
-			results := bundle.Compile(log, options)
+			results, metafile := bundle.Compile(log, options)
+			metafileJSON = metafile
 
 			// Stop now if there were errors
 			if !log.HasErrors() {
@@ -871,6 +949,7 @@ func rebuildImpl(
 		Errors:      convertMessagesToPublic(logger.Error, msgs),
 		Warnings:    convertMessagesToPublic(logger.Warning, msgs),
 		OutputFiles: outputFiles,
+		Metafile:    metafileJSON,
 		Rebuild:     rebuild,
 		Stop:        stop,
 	}
@@ -1030,7 +1109,7 @@ func (w *watcher) tryToFindDirtyPath() string {
 func transformImpl(input string, transformOpts TransformOptions) TransformResult {
 	log := logger.NewStderrLog(logger.OutputOptions{
 		IncludeSource: true,
-		MessageLimit:  transformOpts.ErrorLimit,
+		MessageLimit:  transformOpts.LogLimit,
 		Color:         validateColor(transformOpts.Color),
 		LogLevel:      validateLogLevel(transformOpts.LogLevel),
 	})
@@ -1102,8 +1181,13 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 			Contents:   input,
 			SourceFile: transformOpts.Sourcefile,
 		},
-		Banner: transformOpts.Banner,
-		Footer: transformOpts.Footer,
+	}
+	if options.Stdin.Loader == config.LoaderCSS {
+		options.CSSBanner = transformOpts.Banner
+		options.CSSFooter = transformOpts.Footer
+	} else {
+		options.JSBanner = transformOpts.Banner
+		options.JSFooter = transformOpts.Footer
 	}
 	if options.SourceMap == config.SourceMapLinkedWithComment {
 		// Linked source maps don't make sense because there's no output file name
@@ -1131,7 +1215,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		// Stop now if there were errors
 		if !log.HasErrors() {
 			// Compile the bundle
-			results = bundle.Compile(log, options)
+			results, _ = bundle.Compile(log, options)
 		}
 	}
 
@@ -1197,7 +1281,7 @@ func (impl *pluginImpl) OnResolve(options OnResolveOptions, callback func(OnReso
 				kind = ResolveJSDynamicImport
 			case ast.ImportRequireResolve:
 				kind = ResolveJSRequireResolve
-			case ast.ImportAt:
+			case ast.ImportAt, ast.ImportAtConditional:
 				kind = ResolveCSSImportRule
 			case ast.ImportURL:
 				kind = ResolveCSSURLToken

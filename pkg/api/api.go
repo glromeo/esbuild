@@ -220,9 +220,9 @@ const (
 // Build API
 
 type BuildOptions struct {
-	Color      StderrColor
-	ErrorLimit int
-	LogLevel   LogLevel
+	Color    StderrColor
+	LogLimit int
+	LogLevel LogLevel
 
 	Sourcemap      SourceMap
 	SourcesContent SourcesContent
@@ -241,7 +241,6 @@ type BuildOptions struct {
 
 	Define    map[string]string
 	Pure      []string
-	AvoidTDZ  bool
 	KeepNames bool
 
 	GlobalName        string
@@ -249,7 +248,7 @@ type BuildOptions struct {
 	PreserveSymlinks  bool
 	Splitting         bool
 	Outfile           string
-	Metafile          string
+	Metafile          bool
 	Outdir            string
 	Outbase           string
 	AbsWorkingDir     string
@@ -257,14 +256,15 @@ type BuildOptions struct {
 	Format            Format
 	External          []string
 	MainFields        []string
+	Conditions        []string // For the "exports" field in "package.json"
 	Loader            map[string]Loader
 	ResolveExtensions []string
 	Tsconfig          string
 	OutExtensions     map[string]string
 	PublicPath        string
 	Inject            []string
-	Banner            string
-	Footer            string
+	Banner            map[string]string
+	Footer            map[string]string
 	NodePaths         []string // The "NODE_PATH" variable from Node.js
 
 	ChunkNames string
@@ -281,9 +281,7 @@ type BuildOptions struct {
 }
 
 type WatchMode struct {
-	SpinnerBusy string
-	SpinnerIdle []string
-	OnRebuild   func(BuildResult)
+	OnRebuild func(BuildResult)
 }
 
 type StdinOptions struct {
@@ -298,6 +296,7 @@ type BuildResult struct {
 	Warnings []Message
 
 	OutputFiles []OutputFile
+	Metafile    string
 
 	Rebuild func() BuildResult // Only when "Incremental: true"
 	Stop    func()             // Only when "Watch: true"
@@ -316,9 +315,9 @@ func Build(options BuildOptions) BuildResult {
 // Transform API
 
 type TransformOptions struct {
-	Color      StderrColor
-	ErrorLimit int
-	LogLevel   LogLevel
+	Color    StderrColor
+	LogLimit int
+	LogLevel LogLevel
 
 	Sourcemap      SourceMap
 	SourcesContent SourcesContent
@@ -342,7 +341,6 @@ type TransformOptions struct {
 
 	Define    map[string]string
 	Pure      []string
-	AvoidTDZ  bool
 	KeepNames bool
 
 	Sourcefile string

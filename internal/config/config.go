@@ -201,6 +201,7 @@ type Options struct {
 
 	ExtensionOrder  []string
 	MainFields      []string
+	Conditions      []string
 	AbsNodePaths    []string // The "NODE_PATH" variable from Node.js
 	ExternalModules ExternalModules
 
@@ -217,16 +218,18 @@ type Options struct {
 	InjectAbsPaths     []string
 	InjectedDefines    []InjectedDefine
 	InjectedFiles      []InjectedFile
-	Banner             string
-	Footer             string
+
+	JSBanner  string
+	JSFooter  string
+	CSSBanner string
+	CSSFooter string
 
 	ChunkPathTemplate []PathTemplate
 	AssetPathTemplate []PathTemplate
 
 	Plugins []Plugin
 
-	// If present, metadata about the bundle is written as JSON here
-	AbsMetadataFile string
+	NeedsMetafile bool
 
 	SourceMap             SourceMap
 	ExcludeSourcesContent bool

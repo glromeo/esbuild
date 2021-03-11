@@ -2047,7 +2047,8 @@ loop:
 				symbol.ImportItemStatus = js_ast.ImportItemMissing
 				c.log.AddRangeWarning(&source, r, fmt.Sprintf("Import %q will always be undefined because there is no matching export", namedImport.Alias))
 			} else {
-				c.addRangeError(source, r, fmt.Sprintf("No matching export for import %q", namedImport.Alias))
+				c.addRangeError(source, r, fmt.Sprintf("No matching export in %q for import %q",
+					c.files[nextTracker.sourceIndex].source.PrettyPath, namedImport.Alias))
 			}
 
 		case importProbablyTypeScriptType:
@@ -2310,7 +2311,7 @@ func (c *linkerContext) advanceImportTracker(tracker importTracker) (importTrack
 		return importTracker{}, importProbablyTypeScriptType, nil
 	}
 
-	return importTracker{}, importNoMatch, nil
+	return importTracker{sourceIndex: otherSourceIndex}, importNoMatch, nil
 }
 
 func (c *linkerContext) markPartsReachableFromEntryPoints() {
@@ -3750,10 +3751,10 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 			}
 		}
 
-		if len(c.options.Banner) > 0 {
-			prevOffset.advanceString(c.options.Banner)
+		if len(c.options.JSBanner) > 0 {
+			prevOffset.advanceString(c.options.JSBanner)
 			prevOffset.advanceString("\n")
-			j.AddString(c.options.Banner)
+			j.AddString(c.options.JSBanner)
 			j.AddString("\n")
 		}
 
@@ -3782,27 +3783,27 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 		}
 
 		// Start the metadata
-		jMeta := js_printer.Joiner{}
-		if c.options.AbsMetadataFile != "" {
+		sbMeta := strings.Builder{}
+		if c.options.NeedsMetafile {
 			// Print imports
 			isFirstMeta := true
-			jMeta.AddString("{\n      \"imports\": [")
+			sbMeta.WriteString("{\n      \"imports\": [")
 			for i, importAbsPath := range continueData.crossChunkAbsPaths {
 				if isFirstMeta {
 					isFirstMeta = false
 				} else {
-					jMeta.AddString(",")
+					sbMeta.WriteString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        {\n          \"path\": %s,\n          \"kind\": %s\n        }",
+				sbMeta.WriteString(fmt.Sprintf("\n        {\n          \"path\": %s,\n          \"kind\": %s\n        }",
 					js_printer.QuoteForJSON(c.res.PrettyPath(logger.Path{Text: importAbsPath, Namespace: "file"}), c.options.ASCIIOnly),
 					js_printer.QuoteForJSON(continueData.crossChunkImportRecords[i].Kind.StringForMetafile(), c.options.ASCIIOnly)))
 			}
 			if !isFirstMeta {
-				jMeta.AddString("\n      ")
+				sbMeta.WriteString("\n      ")
 			}
 
 			// Print exports
-			jMeta.AddString("],\n      \"exports\": [")
+			sbMeta.WriteString("],\n      \"exports\": [")
 			var aliases []string
 			if c.options.OutputFormat.KeepES6ImportExportSyntax() {
 				if chunk.isEntryPoint {
@@ -3830,19 +3831,19 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 				if isFirstMeta {
 					isFirstMeta = false
 				} else {
-					jMeta.AddString(",")
+					sbMeta.WriteString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        %s",
+				sbMeta.WriteString(fmt.Sprintf("\n        %s",
 					js_printer.QuoteForJSON(alias, c.options.ASCIIOnly)))
 			}
 			if !isFirstMeta {
-				jMeta.AddString("\n      ")
+				sbMeta.WriteString("\n      ")
 			}
 			if chunk.isEntryPoint {
 				entryPoint := c.files[chunk.sourceIndex].source.PrettyPath
-				jMeta.AddString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {", js_printer.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
+				sbMeta.WriteString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {", js_printer.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
 			} else {
-				jMeta.AddString("],\n      \"inputs\": {")
+				sbMeta.WriteString("],\n      \"inputs\": {")
 			}
 		}
 
@@ -3854,7 +3855,7 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 		var metaByteCount map[string]int
 		commentSet := make(map[string]bool)
 		prevComment := uint32(0)
-		if c.options.AbsMetadataFile != "" {
+		if c.options.NeedsMetafile {
 			metaOrder = make([]string, 0, len(compileResults))
 			metaByteCount = make(map[string]int, len(compileResults))
 		}
@@ -3918,7 +3919,7 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 				}
 
 				// Include this file in the metadata
-				if c.options.AbsMetadataFile != "" {
+				if c.options.NeedsMetafile {
 					// Accumulate file sizes since a given file may be split into multiple parts
 					path := c.files[compileResult.sourceIndex].source.PrettyPath
 					if count, ok := metaByteCount[path]; ok {
@@ -3971,8 +3972,8 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 			j.AddString("\n")
 		}
 
-		if len(c.options.Footer) > 0 {
-			j.AddString(c.options.Footer)
+		if len(c.options.JSFooter) > 0 {
+			j.AddString(c.options.JSFooter)
 			j.AddString("\n")
 		}
 
@@ -4000,10 +4001,10 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 			// Write the generated source map as an external file
 			if writeFile {
 				// Optionally add metadata about the file
-				var jsonMetadataChunk []byte
-				if c.options.AbsMetadataFile != "" {
-					jsonMetadataChunk = []byte(fmt.Sprintf(
-						"{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }", len(sourceMap)))
+				var jsonMetadataChunk string
+				if c.options.NeedsMetafile {
+					jsonMetadataChunk = fmt.Sprintf(
+						"{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {},\n      \"bytes\": %d\n    }", len(sourceMap))
 				}
 
 				// Figure out the base name for the source map which may include the content hash
@@ -4062,23 +4063,23 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func(gener
 		}
 
 		// End the metadata
-		var jsonMetadataChunk []byte
-		if c.options.AbsMetadataFile != "" {
+		var jsonMetadataChunk string
+		if c.options.NeedsMetafile {
 			isFirstMeta := true
 			for _, path := range metaOrder {
 				if isFirstMeta {
 					isFirstMeta = false
 				} else {
-					jMeta.AddString(",")
+					sbMeta.WriteString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        }",
+				sbMeta.WriteString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        }",
 					js_printer.QuoteForJSON(path, c.options.ASCIIOnly), metaByteCount[path]))
 			}
 			if !isFirstMeta {
-				jMeta.AddString("\n      ")
+				sbMeta.WriteString("\n      ")
 			}
-			jMeta.AddString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", len(jsContents)))
-			jsonMetadataChunk = jMeta.Done()
+			sbMeta.WriteString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", len(jsContents)))
+			jsonMetadataChunk = sbMeta.String()
 		}
 
 		results = append(results, OutputFile{
@@ -4129,10 +4130,15 @@ func (c *linkerContext) generateGlobalNamePrefix() string {
 }
 
 type compileResultCSS struct {
-	printedCSS            string
-	sourceIndex           uint32
-	hasCharset            bool
-	externalImportRecords []ast.ImportRecord
+	printedCSS      string
+	sourceIndex     uint32
+	hasCharset      bool
+	externalImports []externalImportCSS
+}
+
+type externalImportCSS struct {
+	record     ast.ImportRecord
+	conditions []css_ast.Token
 }
 
 func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(generateContinue) []OutputFile {
@@ -4163,7 +4169,10 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 					continue
 				case *css_ast.RAtImport:
 					if record := ast.ImportRecords[r.ImportRecordIndex]; !record.SourceIndex.IsValid() {
-						compileResult.externalImportRecords = append(compileResult.externalImportRecords, record)
+						compileResult.externalImports = append(compileResult.externalImports, externalImportCSS{
+							record:     record,
+							conditions: r.ImportConditions,
+						})
 					}
 					continue
 				}
@@ -4187,6 +4196,11 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 		j := js_printer.Joiner{}
 		newlineBeforeComment := false
 
+		if len(c.options.CSSBanner) > 0 {
+			j.AddString(c.options.CSSBanner)
+			j.AddString("\n")
+		}
+
 		// Generate any prefix rules now
 		{
 			ast := css_ast.AST{}
@@ -4202,9 +4216,12 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 			// Insert all external "@import" rules at the front. In CSS, all "@import"
 			// rules must come first or the browser will just ignore them.
 			for _, compileResult := range compileResults {
-				for _, record := range compileResult.externalImportRecords {
-					ast.Rules = append(ast.Rules, &css_ast.RAtImport{ImportRecordIndex: uint32(len(ast.ImportRecords))})
-					ast.ImportRecords = append(ast.ImportRecords, record)
+				for _, external := range compileResult.externalImports {
+					ast.Rules = append(ast.Rules, &css_ast.RAtImport{
+						ImportRecordIndex: uint32(len(ast.ImportRecords)),
+						ImportConditions:  external.conditions,
+					})
+					ast.ImportRecords = append(ast.ImportRecords, external.record)
 				}
 			}
 
@@ -4220,22 +4237,22 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 		}
 
 		// Start the metadata
-		jMeta := js_printer.Joiner{}
-		if c.options.AbsMetadataFile != "" {
+		sbMeta := strings.Builder{}
+		if c.options.NeedsMetafile {
 			isFirstMeta := true
-			jMeta.AddString("{\n      \"imports\": [")
+			sbMeta.WriteString("{\n      \"imports\": [")
 			for i, importAbsPath := range continueData.crossChunkAbsPaths {
 				if isFirstMeta {
 					isFirstMeta = false
 				} else {
-					jMeta.AddString(",")
+					sbMeta.WriteString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        {\n          \"path\": %s,\n          \"kind\": %s\n        }",
+				sbMeta.WriteString(fmt.Sprintf("\n        {\n          \"path\": %s,\n          \"kind\": %s\n        }",
 					js_printer.QuoteForJSON(c.res.PrettyPath(logger.Path{Text: importAbsPath, Namespace: "file"}), c.options.ASCIIOnly),
 					js_printer.QuoteForJSON(continueData.crossChunkImportRecords[i].Kind.StringForMetafile(), c.options.ASCIIOnly)))
 			}
 			if !isFirstMeta {
-				jMeta.AddString("\n      ")
+				sbMeta.WriteString("\n      ")
 			}
 			if chunk.isEntryPoint {
 				file := &c.files[chunk.sourceIndex]
@@ -4244,13 +4261,13 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 				// importing CSS into JavaScript. We want this to be a 1:1 relationship
 				// and there is already an output file for the JavaScript entry point.
 				if _, ok := file.repr.(*reprCSS); ok {
-					jMeta.AddString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {",
+					sbMeta.WriteString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {",
 						js_printer.QuoteForJSON(file.source.PrettyPath, c.options.ASCIIOnly)))
 				} else {
-					jMeta.AddString("],\n      \"inputs\": {")
+					sbMeta.WriteString("],\n      \"inputs\": {")
 				}
 			} else {
-				jMeta.AddString("],\n      \"inputs\": {")
+				sbMeta.WriteString("],\n      \"inputs\": {")
 			}
 		}
 		isFirstMeta := true
@@ -4269,13 +4286,13 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 			j.AddString(compileResult.printedCSS)
 
 			// Include this file in the metadata
-			if c.options.AbsMetadataFile != "" {
+			if c.options.NeedsMetafile {
 				if isFirstMeta {
 					isFirstMeta = false
 				} else {
-					jMeta.AddString(",")
+					sbMeta.WriteString(",")
 				}
-				jMeta.AddString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        }",
+				sbMeta.WriteString(fmt.Sprintf("\n        %s: {\n          \"bytesInOutput\": %d\n        }",
 					js_printer.QuoteForJSON(c.files[compileResult.sourceIndex].source.PrettyPath, c.options.ASCIIOnly),
 					len(compileResult.printedCSS)))
 			}
@@ -4283,6 +4300,11 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 
 		// Make sure the file ends with a newline
 		if j.Length() > 0 && j.LastByte() != '\n' {
+			j.AddString("\n")
+		}
+
+		if len(c.options.CSSFooter) > 0 {
+			j.AddString(c.options.CSSFooter)
 			j.AddString("\n")
 		}
 
@@ -4307,13 +4329,13 @@ func (repr *chunkReprCSS) generate(c *linkerContext, chunk *chunkInfo) func(gene
 		}
 
 		// End the metadata
-		var jsonMetadataChunk []byte
-		if c.options.AbsMetadataFile != "" {
+		var jsonMetadataChunk string
+		if c.options.NeedsMetafile {
 			if !isFirstMeta {
-				jMeta.AddString("\n      ")
+				sbMeta.WriteString("\n      ")
 			}
-			jMeta.AddString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", len(cssContents)))
-			jsonMetadataChunk = jMeta.Done()
+			sbMeta.WriteString(fmt.Sprintf("},\n      \"bytes\": %d\n    }", len(cssContents)))
+			jsonMetadataChunk = sbMeta.String()
 		}
 
 		results = append(results, OutputFile{
