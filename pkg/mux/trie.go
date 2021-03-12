@@ -155,8 +155,8 @@ func (t *Tree) Search(namespace string, path string) (*Result, error) {
 
 	n := t.namespace[namespace]
 
-	if len(n.label) == 0 && len(n.children) == 0 {
-		return nil, errors.New("tree is empty")
+	if n == nil || len(n.label) == 0 && len(n.children) == 0 {
+		return nil, errors.New("tree is empty for namespace: " + namespace)
 	}
 
 	label := deleteEmpty(strings.Split(path, pathDelimiter))
