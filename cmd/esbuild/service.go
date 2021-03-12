@@ -8,7 +8,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"github.com/evanw/esbuild/internal/mux"
 	"io"
 	"io/ioutil"
 	"os"
@@ -23,6 +22,7 @@ import (
 	"github.com/evanw/esbuild/internal/logger"
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/evanw/esbuild/pkg/cli"
+	"github.com/evanw/esbuild/pkg/mux"
 )
 
 type responseCallback = func(interface{})
@@ -377,11 +377,10 @@ func (service *serviceType) handleBuildRequest(id uint32, request map[string]int
 	}
 
 	if plugins, ok := request["plugins"]; ok {
-		if plugins, trie, err := service.convertPlugins(key, plugins); err != nil {
+		if plugins, err := service.convertPlugins(key, plugins); err != nil {
 			return outgoingPacket{bytes: encodeErrorPacket(id, err)}
 		} else {
 			options.Plugins = plugins
-			options.Trie = trie
 		}
 	}
 
@@ -554,9 +553,15 @@ func (service *serviceType) handleServeRequest(id uint32, options api.BuildOptio
 	}
 }
 
-func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]api.Plugin, mux.Tree, error) {
+func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]api.Plugin, error) {
 	var goPlugins []api.Plugin
-	var goTrie = mux.NewTree()
+
+	type routedCallback struct {
+		route      string
+		pluginName string
+		namespace  string
+		id         int
+	}
 
 	type filteredCallback struct {
 		filter     *regexp.Regexp
@@ -565,22 +570,35 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 		id         int
 	}
 
+	var onResolveTrie = mux.NewTree()
+	var onLoadTrie = mux.NewTree()
 	var onResolveCallbacks []filteredCallback
 	var onLoadCallbacks []filteredCallback
 
-	filteredCallbacks := func(pluginName string, kind string, items []interface{}) (result []filteredCallback, err error) {
+	collectCallbacks := func(pluginName string, kind string, items []interface{}) (filtered []filteredCallback, routed []routedCallback, err error) {
 		for _, item := range items {
 			item := item.(map[string]interface{})
-			filter, err := config.CompileFilterForPlugin(pluginName, kind, item["filter"].(string))
-			if err != nil {
-				return nil, err
+			route := item["route"].(string)
+			namespace := item["namespace"].(string)
+			if route != "" {
+				routed = append(routed, routedCallback{
+					pluginName: pluginName,
+					id:         item["id"].(int),
+					route:      route,
+					namespace:  namespace,
+				})
+			} else {
+				filter, err := config.CompileFilterForPlugin(pluginName, kind, item["filter"].(string))
+				if err != nil {
+					return nil, nil, err
+				}
+				filtered = append(filtered, filteredCallback{
+					pluginName: pluginName,
+					id:         item["id"].(int),
+					filter:     filter,
+					namespace:  namespace,
+				})
 			}
-			result = append(result, filteredCallback{
-				pluginName: pluginName,
-				id:         item["id"].(int),
-				filter:     filter,
-				namespace:  item["namespace"].(string),
-			})
 		}
 		return
 	}
@@ -589,16 +607,28 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 		p := p.(map[string]interface{})
 		pluginName := p["name"].(string)
 
-		if callbacks, err := filteredCallbacks(pluginName, "onResolve", p["onResolve"].([]interface{})); err != nil {
-			return nil, mux.Tree{}, err
+		if filtered, routed, err := collectCallbacks(pluginName, "onResolve", p["onResolve"].([]interface{})); err != nil {
+			return nil, err
 		} else {
-			onResolveCallbacks = append(onResolveCallbacks, callbacks...)
+			onResolveCallbacks = append(onResolveCallbacks, filtered...)
+			for _, cb := range routed {
+				err := onResolveTrie.Insert(cb.namespace, cb.route, cb)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 
-		if callbacks, err := filteredCallbacks(pluginName, "onLoad", p["onLoad"].([]interface{})); err != nil {
-			return nil, mux.Tree{}, err
+		if filtered, routed, err := collectCallbacks(pluginName, "onLoad", p["onLoad"].([]interface{})); err != nil {
+			return nil, err
 		} else {
-			onLoadCallbacks = append(onLoadCallbacks, callbacks...)
+			onLoadCallbacks = append(onLoadCallbacks, filtered...)
+			for _, cb := range routed {
+				err := onLoadTrie.Insert(cb.namespace, cb.route, cb)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 
@@ -611,9 +641,16 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 			build.OnResolve(api.OnResolveOptions{Filter: ".*"}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 				var ids []interface{}
 				applyPath := logger.Path{Text: args.Path, Namespace: args.Namespace}
-				for _, item := range onResolveCallbacks {
-					if config.PluginAppliesToPath(applyPath, item.filter, item.namespace) {
-						ids = append(ids, item.id)
+				if searchResult, err := onResolveTrie.Search(args.Namespace, args.Path); err == nil {
+					for _, handler := range searchResult.Handlers {
+						callback := handler.(routedCallback)
+						ids = append(ids, callback.id)
+					}
+				} else {
+					for _, item := range onResolveCallbacks {
+						if config.PluginAppliesToPath(applyPath, item.filter, item.namespace) {
+							ids = append(ids, item.id)
+						}
 					}
 				}
 
@@ -699,9 +736,16 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 			build.OnLoad(api.OnLoadOptions{Filter: ".*"}, func(args api.OnLoadArgs) (api.OnLoadResult, error) {
 				var ids []interface{}
 				applyPath := logger.Path{Text: args.Path, Namespace: args.Namespace}
-				for _, item := range onLoadCallbacks {
-					if config.PluginAppliesToPath(applyPath, item.filter, item.namespace) {
-						ids = append(ids, item.id)
+				if searchResult, err := onLoadTrie.Search(args.Namespace, args.Path); err == nil {
+					for _, handler := range searchResult.Handlers {
+						callback := handler.(routedCallback)
+						ids = append(ids, callback.id)
+					}
+				} else {
+					for _, item := range onLoadCallbacks {
+						if config.PluginAppliesToPath(applyPath, item.filter, item.namespace) {
+							ids = append(ids, item.id)
+						}
 					}
 				}
 
@@ -763,7 +807,7 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 		},
 	})
 
-	return goPlugins, *goTrie, nil
+	return goPlugins, nil
 }
 
 func (service *serviceType) handleTransformRequest(id uint32, request map[string]interface{}) []byte {

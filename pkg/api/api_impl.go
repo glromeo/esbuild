@@ -1260,10 +1260,6 @@ func (impl *pluginImpl) OnResolve(options OnResolveOptions, callback func(OnReso
 		return
 	}
 
-	if len(options.Route) > 0 {
-
-	}
-
 	impl.plugin.OnResolve = append(impl.plugin.OnResolve, config.OnResolve{
 		Name:      impl.plugin.Name,
 		Filter:    filter,

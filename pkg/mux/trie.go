@@ -27,7 +27,6 @@ package mux
 import (
 	"errors"
 	"fmt"
-	"github.com/evanw/esbuild/internal/config"
 	"regexp"
 	"strings"
 	"sync"
@@ -35,13 +34,13 @@ import (
 
 // Tree is a trie tree.
 type Tree struct {
-	method map[string]*Node
+	namespace map[string]*Node
 }
 
 // Node is a node of tree.
 type Node struct {
 	label    string
-	handler  *Handler
+	handlers []interface{}
 	children map[string]*Node
 }
 
@@ -56,14 +55,8 @@ type Params []*Param
 
 // Result is a search result.
 type Result struct {
-	onResolve *config.OnResolve
-	onLoad    *config.OnLoad
-	params    Params
-}
-
-type Handler struct {
-	onResolve *config.OnResolve
-	onLoad    *config.OnLoad
+	Handlers []interface{}
+	Params   Params
 }
 
 const (
@@ -75,29 +68,42 @@ const (
 )
 
 // NewTree creates a new trie tree.
-func NewTree() *Tree {
-	return &Tree{
-		method: map[string]*Node{
-			"*.*": {
-				label:    "",
-				handler:  nil,
-				children: make(map[string]*Node),
-			},
-		},
+func NewTree(namespaces ...string) *Tree {
+	namespace := make(map[string]*Node, len(namespaces))
+	for _, name := range namespaces {
+		namespace[name] = &Node{
+			label:    "",
+			handlers: nil,
+			children: make(map[string]*Node),
+		}
 	}
+	return &Tree{namespace}
 }
 
 // Insert inserts a route definition to tree.
-func (t *Tree) Insert(method string, path string, handler Handler) error {
-	curNode := t.method[method]
+func (t *Tree) Insert(namespace string, path string, handler interface{}) error {
+	curNode, present := t.namespace[namespace]
+
+	if !present {
+		curNode = &Node{
+			label:    "",
+			handlers: nil,
+			children: make(map[string]*Node),
+		}
+		t.namespace[namespace] = curNode
+	}
 
 	if path == pathDelimiter {
-		if len(curNode.label) != 0 && curNode.handler == nil {
+		if len(curNode.label) != 0 && curNode.handlers == nil {
 			return errors.New("Root node already exists")
 		}
 
 		curNode.label = path
-		curNode.handler = &handler
+		if curNode.handlers == nil {
+			curNode.handlers = []interface{}{handler}
+		} else {
+			curNode.handlers = append(curNode.handlers, handler)
+		}
 
 		return nil
 	}
@@ -108,7 +114,7 @@ func (t *Tree) Insert(method string, path string, handler Handler) error {
 		} else {
 			curNode.children[l] = &Node{
 				label:    l,
-				handler:  &handler,
+				handlers: []interface{}{handler},
 				children: make(map[string]*Node),
 			}
 
@@ -144,10 +150,10 @@ func (rc *regCache) Get(ptn string) (*regexp.Regexp, error) {
 var regC = &regCache{}
 
 // Search searches a path from a tree.
-func (t *Tree) Search(method string, path string) (*Result, error) {
+func (t *Tree) Search(namespace string, path string) (*Result, error) {
 	var params Params
 
-	n := t.method[method]
+	n := t.namespace[namespace]
 
 	if len(n.label) == 0 && len(n.children) == 0 {
 		return nil, errors.New("tree is empty")
@@ -204,14 +210,13 @@ func (t *Tree) Search(method string, path string) (*Result, error) {
 		}
 	}
 
-	if curNode.handler == nil {
+	if curNode.handlers == nil {
 		return &Result{}, errors.New("handler is not registered")
 	}
 
 	return &Result{
-		onLoad:    curNode.handler.onLoad,
-		onResolve: curNode.handler.onResolve,
-		params:    params,
+		Handlers: curNode.handlers,
+		Params:   params,
 	}, nil
 }
 
